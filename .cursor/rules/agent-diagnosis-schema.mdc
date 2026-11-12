@@ -1,0 +1,21 @@
+---
+description: Use Diagnosis, with Field descriptions, to format the LLM response
+globs: backend/agent/schemas/**/*.py
+alwaysApply: false
+---
+
+# Diagnosis response schema
+
+Use the `Diagnosis` Pydantic model as `response_format` so the LLM response is returned as that schema.
+
+When defining the schema, set `Field(description=...)` on each field so the LLM can read what the field means.
+
+```python
+class Diagnosis(BaseModel):
+    """Structured diagnosis returned by the model."""
+
+    code_bug_found: bool = Field(description="True when a code bug was found.")
+    file_path: str | None = Field(
+        description="Repository path of the cause, or None when no file is blamed."
+    )
+```

@@ -44,6 +44,7 @@ The long-term plan is in Section 16.
 - Supporting multiple repositories or languages
 - Building a complete developer product
 - Using customer data, personal data or private business logs
+- Giving the scored runs a web search tool
 - Proving that one condition is better in general
 
 ## 5. Experiment design
@@ -56,7 +57,7 @@ The long-term plan is in Section 16.
 | **C2** | Implicated file | C1, plus the source file named in the stack trace at the deployed commit |
 | **C3** | Repository exploration | C1, plus repository tools fixed to the deployed commit |
 
-C2 is a simple non-agent baseline. If the input doesn't identify a source file, C2 receives only the log or report, and the run is flagged.
+C2 is a simple non-agent baseline. If the input doesn't identify a source file, C2 receives only the log or report, and the run is flagged. Section 9 draws all three conditions as one graph: C1 and C2 take a single model step, and C3 loops through repository tools.
 
 ### Test cases
 
@@ -99,6 +100,7 @@ Example record:
 ### Controls
 
 - Use the same model, settings, system prompt and output format for every condition.
+- Keep web search out of the 54 scored runs. Section 9 says where Tavily may be used.
 - Limit each run to 8 tool calls.
 - Run each case 3 times per condition, for 54 runs in total.
 - Randomize the run order.
@@ -212,7 +214,7 @@ React demo app ──> POST /api/logs ──> JSONL logs ──> Frozen test cas
        └──────────> POST /api/debug                       v
                          │                         Experiment runner
                          v                                │
-                  LangChain agent <───────────────────────┘
+                    Agent loop <──────────────────────────┘
                      │        │
           GitHub read tools   LangSmith traces
                      │
@@ -221,6 +223,65 @@ React demo app ──> POST /api/logs ──> JSONL logs ──> Frozen test cas
                      │
                      └───────────────> Isolated fix check
 ```
+
+### Agent loop
+
+One graph serves every condition. The model, system prompt and diagnosis schema stay the same. The condition decides whether any file is preloaded and whether repository tools are available.
+
+```text
+START
+  |
+  v
+prepare
+  |  C1: error log. Tools off.
+  |  C2: error log + the stack-trace file at commit_sha. Tools off.
+  |  C3: error log. Tools on.
+  v
++--> model -- C1, C2, or no tool call --> diagnosis --> END
+|      |
+|      +-- C3 tool call, and tool_calls_used < 8 --> tools
+|                                                      |
++------------------------------------------------------+
+                    list_files(path)
+                    read_file(path)
+                    both at commit_sha
+
+After the 8th tool result, the return edge visits model with tools turned off.
+That visit can only go to diagnosis.
+```
+
+| From | To | When |
+|---|---|---|
+| prepare | model | Always. C2 has already loaded the one implicated file. C3 has loaded nothing else. |
+| model | tools | C3 only. The model called `list_files` or `read_file`, and fewer than 8 tool calls have run. |
+| tools | model | The tool result is appended. A blocked path or tool error is still a result, and it still counts. The 8th result returns with tools turned off. |
+| model | diagnosis | C1, C2, or this visit requested no tool. That response is the diagnosis. |
+| diagnosis | END | The diagnosis matches the `POST /api/debug` schema. An invalid diagnosis is stored and counted. It is not sent around the loop again. |
+
+Each visit to `model` sees the error log, the C2 file when this is a C2 run, and the tool results so far. It does not see the rest of the repository.
+
+`tools` accepts two calls, both fixed to `commit_sha`. Define each tool in its own file under `backend/agent/tools/`:
+
+- `backend/agent/tools/list_files.py` lists allowed source files under a path.
+- `backend/agent/tools/read_file.py` returns one allowed source file.
+
+Both reject `.env`, secrets, deployment files and any path outside the allowlist. The rejection text is the observation the model reads next.
+
+C3 is this loop: the model chooses a file, reads the observation, and chooses again, until it can fill the diagnosis or it has used 8 tool calls. C1 and C2 are the same graph with the tool edge removed, so they remain the non-agent baselines.
+
+### Diagnosis schema
+
+The `diagnosis` step uses one Pydantic model for every condition, defined in `backend/agent/schemas/diagnosis.py`. LangChain accepts that model as `response_format`, so the model returns the `POST /api/debug` fields directly: `code_bug_found`, `file_path`, `root_cause`, `explanation`, `proposed_fix`, `confidence`, and `evidence`.
+
+C1 and C2 use this model on their single model call. C3 uses it when the loop stops. If validation fails, store that run and count it as an invalid diagnosis. The graph does not send it back through the loop.
+
+Pydantic checks this last response only. `list_files` and `read_file` stay ordinary tools.
+
+### Web search
+
+Tavily stays out of `prepare`, `model`, and `tools` for the 54 scored runs. The study measures how much of the deployed repository the model can see. A search result is another context: the model could answer from a React article instead of the commit that produced the log, and the call would count toward the 8-tool cap and the token, cost, and latency measures.
+
+Tavily may be used while preparing the six cases. It may also be added as its own condition after those 54 runs are frozen and scored. A search query includes the error log, so it goes to Tavily only during that preparation or later condition.
 
 ### AWS demo
 
@@ -241,6 +302,11 @@ react-debug-agent-lab/
 ├── backend/
 │   ├── app/
 │   ├── agent/
+│   │   ├── tools/
+│   │   │   ├── list_files.py
+│   │   │   └── read_file.py
+│   │   └── schemas/
+│   │       └── diagnosis.py
 │   └── tests/
 ├── evals/
 │   ├── cases/
@@ -259,6 +325,7 @@ react-debug-agent-lab/
 - Limit tools to allowed source file paths and block `.env`, secrets and deployment files.
 - Treat logs and source code as untrusted data, because they may contain prompt injection text.
 - Remove secrets and personal data before sending logs to the LLM or LangSmith.
+- During the 54 scored runs, send logs and source only to the model provider, LangSmith, and the demo repository.
 - Never run proposed code on the API server.
 - Run tests in a short-lived container with no secrets, cloud credentials or network access, and with CPU, memory and time limits.
 - Keep the intentionally vulnerable code in the demo copy, and never deploy it publicly.

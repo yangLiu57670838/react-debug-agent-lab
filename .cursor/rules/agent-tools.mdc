@@ -1,0 +1,20 @@
+---
+description: Document each tool argument with its type
+globs: backend/agent/tools/**/*.py
+alwaysApply: false
+---
+
+# Agent tools
+
+Write each tool with typed arguments and a docstring that names every argument and its type.
+
+```python
+@tool
+def read_file(path: str, commit_sha: str) -> str:
+    """Read one allowed source file at commit_sha.
+
+    Args:
+        path (str): Allowed source path relative to the repository root.
+        commit_sha (str): Deployed commit to read.
+    """
+```
